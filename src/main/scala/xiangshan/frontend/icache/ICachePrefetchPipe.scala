@@ -211,29 +211,25 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
   private val s1_metaPTags  = fromMeta.tags
   private val s1_metaValids = fromMeta.entryValid
 
-  private val s1_sramWaymasks = VecInit((0 until PortNumber).map { port =>
-    getWaymask(s1_pTag, s1_metaPTags(port), s1_metaValids(port))
-  })
-
-  private val s1_sramMaybeRvcMap = VecInit((0 until PortNumber).map { port =>
-    Mux1H(s1_sramWaymasks(port), fromMeta.maybeRvcMap(port))
-  })
-
-  // select ecc code
-  /* NOTE:
-   * When ECC check fails, s1_waymasks may be corrupted, so this selected meta_codes may be wrong.
-   * However, we can guarantee that the request sent to the l2 cache and the response to the IFU are both correct,
-   * considering the probability of bit flipping abnormally is very small, consider there's up to 1 bit being wrong:
-   * 1. miss -> fake hit: The wrong bit in s1_waymasks was set to true.B, thus selects the wrong meta_codes,
-   *                      but we can detect this by checking whether `encodeMetaECC(req_pTags) === meta_codes`.
-   * 2. hit -> fake multi-hit: In normal situation, multi-hit never happens, so multi-hit indicates ECC failure,
-   *                           we can detect this by checking whether `PopCount(waymasks) <= 1.U`,
-   *                           and meta_codes is not important in this situation.
-   * 3. hit -> fake miss: We can't detect this, but we can (pre)fetch the correct data from L2 cache, so it's not a problem.
-   * 4. hit -> hit / miss -> miss: ECC failure happens in an irrelevant way, so we don't care about it this time.
-   */
-  private val s1_sramMetaCodes = VecInit((0 until PortNumber).map { port =>
-    Mux1H(s1_sramWaymasks(port), fromMeta.codes(port))
+  private val s1_sramMetaInfo = VecInit((0 until PortNumber).map { port =>
+    val info = Wire(new MetaInfo)
+    info.waymask     := getWaymask(s1_pTag, s1_metaPTags(port), s1_metaValids(port))
+    info.maybeRvcMap := Mux1H(info.waymask, fromMeta.maybeRvcMap(port))
+    // select ecc code
+    /* NOTE:
+     * When ECC check fails, s1_waymasks may be corrupted, so this selected meta_codes may be wrong.
+     * However, we can guarantee that the request sent to the l2 cache and the response to the IFU are both correct,
+     * considering the probability of bit flipping abnormally is very small, consider there's up to 1 bit being wrong:
+     * 1. miss -> fake hit: The wrong bit in s1_waymasks was set to true.B, thus selects the wrong meta_codes,
+     *                      but we can detect this by checking whether `encodeMetaECC(req_pTags) === meta_codes`.
+     * 2. hit -> fake multi-hit: In normal situation, multi-hit never happens, so multi-hit indicates ECC failure,
+     *                           we can detect this by checking whether `PopCount(waymasks) <= 1.U`,
+     *                           and meta_codes is not important in this situation.
+     * 3. hit -> fake miss: We can't detect this, but we can (pre)fetch the correct data from L2 cache, so it's not a problem.
+     * 4. hit -> hit / miss -> miss: ECC failure happens in an irrelevant way, so we don't care about it this time.
+     */
+    info.metaCodes := Mux1H(info.waymask, fromMeta.codes(port))
+    info
   })
 
   /**
@@ -242,29 +238,26 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
     ******************************************************************************
     */
 
-  private val s1_sramValid      = s0_fireNext || RegNext(s1_needMeta && toMeta.ready)
-  private val s1_mshrValid      = fromMiss.valid && !fromMiss.bits.corrupt
-  private val s1_waymasks       = WireInit(VecInit(Seq.fill(PortNumber)(0.U(nWays.W))))
-  private val s1_waymasksReg    = RegEnable(s1_waymasks, 0.U.asTypeOf(s1_waymasks), s1_sramValid || s1_mshrValid)
-  private val s1_maybeRvcMap    = WireInit(VecInit(Seq.fill(PortNumber)(0.U(MaxInstNumPerBlock.W))))
-  private val s1_maybeRvcMapReg = RegEnable(s1_maybeRvcMap, 0.U.asTypeOf(s1_maybeRvcMap), s1_sramValid || s1_mshrValid)
-  private val s1_metaCodes      = WireInit(VecInit(Seq.fill(PortNumber)(0.U(MetaEccBits.W))))
-  private val s1_metaCodesReg   = RegEnable(s1_metaCodes, 0.U.asTypeOf(s1_metaCodes), s1_sramValid || s1_mshrValid)
+  private val s1_sramValid = s0_fireNext || RegNext(s1_needMeta && toMeta.ready)
+  private val s1_mshrValid = fromMiss.valid && !fromMiss.bits.corrupt
 
-  // update waymasks and meta_codes
-  (0 until PortNumber).foreach { i =>
-    val (_, newMask, newMaybeRvcMap, newCode) = updateMetaInfo(
+  private val s1_metaInfo = Wire(Vec(PortNumber, new MetaInfo))
+  private val s1_metaInfoReg = VecInit(s1_metaInfo.zipWithIndex.map { case (wire, i) =>
+    RegEnable(wire, 0.U.asTypeOf(wire), (s1_sramValid || s1_mshrValid) && ((i == 0).B || s1_doubleline))
+  })
+
+  // assign metaInfo wire to updated value ((sram or reg) + miss)
+  (0 until PortNumber).foreach { port =>
+    val (_, newInfo) = updateMetaInfo(
       fromMiss,
-      Mux(s1_sramValid, s1_sramWaymasks(i), s1_waymasksReg(i)),
-      s1_vSetIdx(i),
+      s1_vSetIdx(port),
       s1_pTag,
-      Mux(s1_sramValid, s1_sramMaybeRvcMap(i), s1_maybeRvcMapReg(i)),
-      Mux(s1_sramValid, s1_sramMetaCodes(i), s1_metaCodesReg(i))
+      Mux(s1_sramValid, s1_sramMetaInfo(port), s1_metaInfoReg(port))
     )
-    s1_waymasks(i)    := newMask
-    s1_metaCodes(i)   := newCode
-    s1_maybeRvcMap(i) := newMaybeRvcMap
+    s1_metaInfo(port) := newInfo
   }
+
+  private val s1_sramHits = VecInit(s1_metaInfo.map(_.waymask.orR))
 
   /**
     ******************************************************************************
@@ -278,17 +271,17 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
   ) && !s1_flush && !fromMiss.valid && !s1_isSoftPrefetch // do not enqueue soft prefetch
   toWayLookup.bits.ftqIdx            := s1_ftqIdx
   toWayLookup.bits.vSetIdx           := s1_vSetIdx
-  toWayLookup.bits.waymask           := s1_waymasks
+  toWayLookup.bits.waymask           := VecInit(s1_metaInfo.map(_.waymask))
   toWayLookup.bits.pTag              := s1_pTag
-  toWayLookup.bits.maybeRvcMap       := s1_maybeRvcMap
+  toWayLookup.bits.maybeRvcMap       := VecInit(s1_metaInfo.map(_.maybeRvcMap))
   toWayLookup.bits.gpAddr            := s1_gpAddr(PAddrBitsMax - 1, 0)
   toWayLookup.bits.isForVSnonLeafPTE := s1_isForVSnonLeafPTE
-  toWayLookup.bits.metaCodes         := s1_metaCodes
+  toWayLookup.bits.metaCodes         := VecInit(s1_metaInfo.map(_.metaCodes))
   toWayLookup.bits.itlbException     := s1_itlbException
   toWayLookup.bits.itlbPbmt          := s1_itlbPbmt
 
   when(toWayLookup.fire) {
-    val waymasksVec = s1_waymasks.map(_.asTypeOf(Vec(nWays, Bool())))
+    val waymasksVec = s1_metaInfo.map(_.waymask.asTypeOf(Vec(nWays, Bool())))
     assert(
       PopCount(waymasksVec(0)) <= 1.U && (PopCount(waymasksVec(1)) <= 1.U || !s1_doubleline),
       "Multi-hit:\nport0: count=%d pTag=0x%x vSet=0x%x vAddr=0x%x\nport1: count=%d pTag=0x%x vSet=0x%x vAddr=0x%x",
@@ -400,30 +393,10 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
   private val s2_pTag           = RegEnable(s1_pTag, 0.U.asTypeOf(s1_pTag), s1_realFire)
   private val s2_exception =
     RegEnable(s1_exceptionOut, 0.U.asTypeOf(s1_exceptionOut), s1_realFire) // includes itlb/pmp exception
-  // disabled for timing consideration
-// private val s2_exceptionIn =
-//   RegEnable(s1_exceptionOut, 0.U.asTypeOf(s1_exceptionOut), s1_realFire)
   private val s2_isMmio   = RegEnable(s1_isMmio, 0.U.asTypeOf(s1_isMmio), s1_realFire)
-  private val s2_waymasks = RegEnable(s1_waymasks, 0.U.asTypeOf(s1_waymasks), s1_realFire)
-  // disabled for timing consideration
-// private val s2_metaCodes   = RegEnable(s1_metaCodes, 0.U.asTypeOf(s1_metaCodes), s1_realFire)
+  private val s2_sramHits = RegEnable(s1_sramHits, 0.U.asTypeOf(s1_sramHits), s1_realFire)
 
   private val s2_vSetIdx = s2_vAddr.map(get_idx)
-
-  // disabled for timing consideration
-//  // do metaArray ECC check
-//  val s2_metaCorrupt = VecInit((s2_pTags zip s2_metaCodes zip s2_waymasks).map{ case ((meta, code), waymask) =>
-//    val hit_num = PopCount(waymask)
-//    // NOTE: if not hit, encodeMetaECC(meta) =/= code can also be true, but we don't care about it
-//    (encodeMetaECC(meta) =/= code && hit_num === 1.U) ||  // hit one way, but parity code does not match, ECC failure
-//      hit_num > 1.U                                       // hit multi-way, must be an ECC failure
-//  })
-//
-//  // generate exception
-//  val s2_metaException = VecInit(s2_metaCorrupt.map(ExceptionType.fromECC(io.ecc_enable, _)))
-//
-//  // merge meta exception and itlb/pmp exception
-//  val s2_exception = ExceptionType.merge(s2_exceptionIn, s2_metaException)
 
   /**
     ******************************************************************************
@@ -442,8 +415,7 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
     )
   )
 
-  private val s2_sramHits = s2_waymasks.map(_.orR)
-  private val s2_hits     = VecInit((0 until PortNumber).map(i => s2_mshrHits(i) || s2_sramHits(i)))
+  private val s2_hits = VecInit((0 until PortNumber).map(i => s2_mshrHits(i) || s2_sramHits(i)))
 
   // do prefetch if not hit and no exception/mmio
   private val s2_miss = VecInit((0 until PortNumber).map { i =>
