@@ -19,6 +19,7 @@ package xiangshan.backend.rename
 import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import chisel3.util._
+import difftest._
 import utility.HasCircularQueuePtrHelper
 import utility.ParallelPriorityMux
 import utility.GatedValidRegNext
@@ -212,8 +213,10 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
   // params alias
   private val numVecRegSrc = backendParams.numVecRegSrc
   private val numVecRatPorts = numVecRegSrc
+  private val DifftestDelay = 2 // Delay of RenameTable should be same as PhyRegFile
 
   val io = IO(new Bundle() {
+    val hartId = Input(UInt(8.W))
     val redirect = Input(Bool())
     val rabCommits = Input(new RabCommitIO)
     val diffCommits = if (backendParams.basicDebugEn) Some(Input(new DiffCommitIO)) else None
@@ -244,10 +247,6 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
     val debug_vl_rat  = if (backendParams.debugEn) Some(Vec(1,Output(UInt(PhyRegIdxWidth.W)))) else None
 
     // for difftest
-    val diff_int_rat = if (backendParams.basicDebugEn) Some(Vec(32, Output(UInt(PhyRegIdxWidth.W)))) else None
-    val diff_fp_rat  = if (backendParams.basicDebugEn) Some(Vec(32, Output(UInt(PhyRegIdxWidth.W)))) else None
-    val diff_vec_rat = if (backendParams.basicDebugEn) Some(Vec(31, Output(UInt(PhyRegIdxWidth.W)))) else None
-    val diff_v0_rat  = if (backendParams.basicDebugEn) Some(Vec(1,Output(UInt(PhyRegIdxWidth.W)))) else None
     val diff_vl_rat  = if (backendParams.basicDebugEn) Some(Vec(1,Output(UInt(PhyRegIdxWidth.W)))) else None
   })
 
@@ -258,7 +257,11 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
   val vlRat  = Module(new RenameTable(Reg_Vl))
 
   io.debug_int_rat .foreach(_ := intRat.io.debug_rdata.get)
-  io.diff_int_rat  .foreach(_ := intRat.io.diff_rdata.get)
+  if (env.AlwaysBasicDiff || env.EnableDifftest) {
+    val difftest = DifftestModule(new DiffArchIntRenameTable(IntPhyRegs), delay = DifftestDelay)
+    difftest.coreid := io.hartId
+    difftest.value := intRat.io.diff_rdata.get
+  }
   intRat.io.readPorts <> io.intReadPorts.flatten
   intRat.io.redirect := io.redirect
   intRat.io.snpt := io.snpt
@@ -294,7 +297,11 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
 
   // debug read ports for difftest
   io.debug_fp_rat.foreach(_ := fpRat.io.debug_rdata.get)
-  io.diff_fp_rat .foreach(_ := fpRat.io.diff_rdata.get)
+  if (env.AlwaysBasicDiff || env.EnableDifftest) {
+    val difftest = DifftestModule(new DiffArchFpRenameTable(FpPhyRegs), delay = DifftestDelay)
+    difftest.coreid := io.hartId
+    difftest.value := fpRat.io.diff_rdata.get
+  }
   fpRat.io.readPorts <> io.fpReadPorts.flatten
   fpRat.io.redirect := io.redirect
   fpRat.io.snpt := io.snpt
@@ -325,9 +332,18 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
     }
   }
 
+  if (env.AlwaysBasicDiff || env.EnableDifftest) {
+    // Split each 128-bit vector reg into two 64-bit regs (lo, hi), so convert index to (2*index, 2*index+1)
+    val splitVecPregs = 2 * (VfPhyRegs + V0PhyRegs)
+    val difftest = DifftestModule(new DiffArchVecRenameTable(splitVecPregs), delay = DifftestDelay)
+    difftest.coreid := io.hartId
+    difftest.value := VecInit((vecRat.io.diff_rdata.get ++ v0Rat.io.diff_rdata.get).flatMap { r =>
+      val splitDest = (r << 1).asUInt
+      Seq(splitDest, splitDest + 1.U)
+    })
+  }
   // debug read ports for difftest
   io.debug_vec_rat    .foreach(_ := vecRat.io.debug_rdata.get)
-  io.diff_vec_rat     .foreach(_ := vecRat.io.diff_rdata.get)
   vecRat.io.readPorts <> io.vecReadPorts.flatten
   vecRat.io.redirect := io.redirect
   vecRat.io.snpt := io.snpt
@@ -364,7 +380,6 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
 
   // debug read ports for difftest
   io.debug_v0_rat.foreach(_ := v0Rat.io.debug_rdata.get)
-  io.diff_v0_rat.foreach(_ := v0Rat.io.diff_rdata.get)
   v0Rat.io.readPorts <> io.v0ReadPorts
   v0Rat.io.redirect := io.redirect
   v0Rat.io.snpt := io.snpt
