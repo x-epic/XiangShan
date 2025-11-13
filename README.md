@@ -108,7 +108,6 @@ make idea
 * Clone this project and run `make init` to initialize submodules.
 
 ### Run with simulator
-
 * Install [Verilator](https://verilator.org/guide/latest/), the open-source Verilog simulator.
 * Run `make emu` to build the C++ simulator `./build/emu` with Verilator.
 * Refer to `./build/emu --help` for run-time arguments of the simulator.
@@ -120,6 +119,32 @@ Example:
 make emu CONFIG=MinimalConfig EMU_THREADS=2 -j10
 ./build/emu -b 0 -e 0 -i ./ready-to-run/coremark-2-iteration.bin --diff ./ready-to-run/riscv64-nemu-interpreter-so
 ```
+
+Alternative tool
+* Install [GalaxSim](https://free.x-epic.com/), the free-to-use Verilog/SystemVerilog simulator.
+* Run `make xsim` to simulate with Verilator.
+* Refer to `Makefile` and `galaxsim.mk` for more information.
+
+
+
+### Run with simulator
+#### Verilator
+* Install [Verilator](https://verilator.org/guide/latest/), the open-source Verilog simulator.
+* Run `make emu` to build the C++ simulator `./build/emu` with Verilator.
+* Refer to `./build/emu --help` for run-time arguments of the simulator.
+* Refer to `Makefile` and `verilator.mk` for more information.
+
+Example:
+
+```bash
+make emu CONFIG=MinimalConfig EMU_THREADS=2 -j10
+./build/emu -b 0 -e 0 -i ./ready-to-run/coremark-2-iteration.bin --diff ./ready-to-run/riscv64-nemu-interpreter-so
+```
+
+#### GalaxSim
+* Install [GalaxSim](https://free.x-epic.com/), the free-to-use Verilog simulator.
+* Run `make xsim` to compile  simulation executable. Then run `make xsim-run` to do simulation.
+* Refer to `Makefile` and `galaxsim.mk` for more information.
 
 ### Run with xspdb 
 * Install [picker](https://github.com/XS-MLVP/picker), a verification tool that supports high-level languages.
